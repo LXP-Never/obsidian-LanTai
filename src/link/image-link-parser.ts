@@ -285,6 +285,9 @@ function readInlineMath(markdown: string, start: number): null | ProtectedRange 
  * Reads the body of `![alt](...)` starting right after the opening parenthesis.
  * Parentheses inside the target are matched by depth so that paths such as
  * `../images/语音增强(SE)/note/图.webp` are not truncated at the first `)`.
+ * Whitespace only ends the target when it is followed by a Markdown title
+ * or by the closing parenthesis, which keeps Obsidian's tolerance for
+ * unencoded spaces in paths such as `../images/Flask 01：后端框架/x.webp`.
  */
 function readMarkdownImageBody(
 	markdown: string,
@@ -313,7 +316,21 @@ function readMarkdownImageBody(
 				}
 				depth -= 1;
 			} else if (WHITESPACE_RE.test(char)) {
-				break;
+				// Obsidian 允许链接目标里出现未编码的空格，只有后面紧跟 Markdown title
+				// 或收尾括号时，空白才表示目标结束。
+				const next = skipSpaces(markdown, index);
+				const nextChar = markdown.charAt(next);
+				if (
+					nextChar === ''
+					|| nextChar === ')'
+					|| nextChar === '"'
+					|| nextChar === '\''
+					|| nextChar === '('
+				) {
+					break;
+				}
+				index = next;
+				continue;
 			}
 			index += 1;
 		}

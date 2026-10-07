@@ -116,6 +116,37 @@ describe('ImageLinkParser', () => {
 		expect(ref?.target).toBe('../a%28b%29/c.webp');
 	});
 
+	it('keeps unencoded spaces inside a local path', () => {
+		const ref = parser.parse(
+			'![](../../repository/images/Web前端后端/爬虫/爬虫01 网络与并发基础/网络分层与报文封装.svg)'
+		)[0];
+
+		expect(ref?.target).toBe(
+			'../../repository/images/Web前端后端/爬虫/爬虫01 网络与并发基础/网络分层与报文封装.svg'
+		);
+	});
+
+	it('keeps spaces in a path that also contains parentheses and full-width colon', () => {
+		const ref = parser.parse('![](../../repository/images/Flask/Flask 02：与 HTTP（请求与响应）/x.svg)')[0];
+
+		expect(ref?.target).toBe('../../repository/images/Flask/Flask 02：与 HTTP（请求与响应）/x.svg');
+	});
+
+	it('still ends the target at a title after a spaced path', () => {
+		const ref = parser.parse('![cap](../images/爬虫01 网络与并发基础/a.svg "Image title")')[0];
+
+		expect(ref).toMatchObject({
+			markdownTitle: '"Image title"',
+			target: '../images/爬虫01 网络与并发基础/a.svg'
+		});
+	});
+
+	it('ends the target at a closing parenthesis after trailing space', () => {
+		const ref = parser.parse('![](a.svg )')[0];
+
+		expect(ref?.target).toBe('a.svg');
+	});
+
 	it('keeps parentheses inside a remote url', () => {
 		const ref = parser.parse('![](https://cdn.example.com/a(b)/c.png)')[0];
 
