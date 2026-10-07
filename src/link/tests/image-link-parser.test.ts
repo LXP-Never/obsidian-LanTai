@@ -72,6 +72,57 @@ describe('ImageLinkParser', () => {
 		expect(refs[0]?.decorations).toEqual([]);
 	});
 
+	it('keeps parentheses inside a markdown target', () => {
+		const ref = parser.parse(
+			'![](../repository/images/语音增强(SE)/基于深度学习的单通道语音增强/频谱映射示意图.webp)'
+		)[0];
+
+		expect(ref?.target).toBe(
+			'../repository/images/语音增强(SE)/基于深度学习的单通道语音增强/频谱映射示意图.webp'
+		);
+		expect(ref?.isRemote).toBe(false);
+	});
+
+	it('preserves the full source range for a target with parentheses', () => {
+		const markdown = 'x ![](../a(b)/c.webp) y';
+		const refs = parser.parse(markdown);
+
+		expect(refs).toHaveLength(1);
+		expect(refs[0]).toMatchObject({
+			end: 21,
+			start: 2
+		});
+		expect(markdown.slice(refs[0]?.start, refs[0]?.end)).toBe('![](../a(b)/c.webp)');
+	});
+
+	it('parses an angle-bracket target containing spaces and parentheses', () => {
+		const ref = parser.parse('![](<../repository/images/my note (v2)/a b.webp>)')[0];
+
+		expect(ref?.target).toBe('../repository/images/my note (v2)/a b.webp');
+	});
+
+	it('parses a title after a parenthesised target', () => {
+		const ref = parser.parse('![cap](../a(b)/c.webp "Image title")')[0];
+
+		expect(ref).toMatchObject({
+			markdownTitle: '"Image title"',
+			target: '../a(b)/c.webp'
+		});
+	});
+
+	it('keeps percent-encoded parentheses as written', () => {
+		const ref = parser.parse('![](../a%28b%29/c.webp)')[0];
+
+		expect(ref?.target).toBe('../a%28b%29/c.webp');
+	});
+
+	it('keeps parentheses inside a remote url', () => {
+		const ref = parser.parse('![](https://cdn.example.com/a(b)/c.png)')[0];
+
+		expect(ref?.target).toBe('https://cdn.example.com/a(b)/c.png');
+		expect(ref?.isRemote).toBe(true);
+	});
+
 	describe('markdown context', () => {
 		it('skips images inside a backtick fence', () => {
 			const markdown = [

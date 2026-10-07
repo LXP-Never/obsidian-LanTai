@@ -5,9 +5,17 @@ const FOOTNOTE_DEFINITION_RE = /^ {0,3}\[\^[^\]\n]+\]:/;
 const FOOTNOTE_CONTINUATION_RE = /^(?:\t| {4,})/;
 const INLINE_FOOTNOTE_OPEN = '^[';
 const MAX_FENCE_INDENT = 3;
-const MD_IMAGE_RE = /!\[(?<alt>[^\]]*)\]\(\s*<?(?<target>[^)\s>]+)>?(?:\s+(?<title>"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g;
+const MARKDOWN_TITLE_RE = /^(?:"[^"]*"|'[^']*'|\([^)]*\))/;
+const MD_IMAGE_OPEN_RE = /!\[(?<alt>[^\]]*)\]\(/g;
 const MIN_FENCE_LENGTH = 3;
+const WHITESPACE_RE = /\s/;
 const WIKI_IMAGE_RE = /!\[\[(?<target>[^\]|]+)(?:\|(?<suffix>[^\]]*))?\]\]/g;
+
+interface MarkdownImageBody {
+	end: number;
+	markdownTitle: null | string;
+	target: string;
+}
 
 interface MatchCandidate {
 	index: number;
@@ -29,25 +37,24 @@ export class ImageLinkParser {
 	public parse(markdown: string): ImageRef[] {
 		const protectedRanges = collectProtectedRanges(markdown);
 		const candidates: MatchCandidate[] = [];
-		for (const match of markdown.matchAll(MD_IMAGE_RE)) {
-			const groups = match.groups;
-			const alt = groups?.['alt'] ?? '';
-			const target = groups?.['target'];
-			const source = match[0];
-			if (!target || !source || isInsideProtectedRange(protectedRanges, match.index)) {
+		for (const match of markdown.matchAll(MD_IMAGE_OPEN_RE)) {
+			const index = match.index;
+			const alt = match.groups?.['alt'] ?? '';
+			const body = readMarkdownImageBody(markdown, index, match[0].length);
+			if (body === null || isInsideProtectedRange(protectedRanges, index)) {
 				continue;
 			}
 			candidates.push({
-				index: match.index,
+				index,
 				ref: {
 					decorations: splitDecorations(alt),
-					end: match.index + source.length,
-					isRemote: /^https?:\/\//i.test(target),
+					end: body.end,
+					isRemote: /^https?:\/\//i.test(body.target),
 					kind: 'markdown',
-					markdownTitle: groups['title'] ?? null,
-					source,
-					start: match.index,
-					target
+					markdownTitle: body.markdownTitle,
+					source: markdown.slice(index, body.end),
+					start: index,
+					target: body.target
 				}
 			});
 		}
@@ -274,6 +281,64 @@ function readInlineMath(markdown: string, start: number): null | ProtectedRange 
 	return null;
 }
 
+/**
+ * Reads the body of `![alt](...)` starting right after the opening parenthesis.
+ * Parentheses inside the target are matched by depth so that paths such as
+ * `../images/语音增强(SE)/note/图.webp` are not truncated at the first `)`.
+ */
+function readMarkdownImageBody(
+	markdown: string,
+	start: number,
+	openLength: number
+): MarkdownImageBody | null {
+	let index = skipSpaces(markdown, start + openLength);
+	let target: string;
+	if (markdown[index] === '<') {
+		const close = markdown.indexOf('>', index + 1);
+		if (close === -1) {
+			return null;
+		}
+		target = markdown.slice(index + 1, close);
+		index = close + 1;
+	} else {
+		const from = index;
+		let depth = 0;
+		while (index < markdown.length) {
+			const char = markdown.charAt(index);
+			if (char === '(') {
+				depth += 1;
+			} else if (char === ')') {
+				if (depth === 0) {
+					break;
+				}
+				depth -= 1;
+			} else if (WHITESPACE_RE.test(char)) {
+				break;
+			}
+			index += 1;
+		}
+		target = markdown.slice(from, index);
+	}
+	if (target === '') {
+		return null;
+	}
+	index = skipSpaces(markdown, index);
+	const title = MARKDOWN_TITLE_RE.exec(markdown.slice(index));
+	let markdownTitle: null | string = null;
+	if (title) {
+		markdownTitle = title[0];
+		index = skipSpaces(markdown, index + title[0].length);
+	}
+	if (markdown[index] !== ')') {
+		return null;
+	}
+	return {
+		end: index + 1,
+		markdownTitle,
+		target
+	};
+}
+
 function readOpeningFence(markdown: string, start: number): null | OpeningFence {
 	let index = start;
 	let indent = 0;
@@ -302,6 +367,14 @@ function readOpeningFence(markdown: string, start: number): null | OpeningFence 
 		char,
 		length
 	};
+}
+
+function skipSpaces(markdown: string, index: number): number {
+	let cursor = index;
+	while (cursor < markdown.length && WHITESPACE_RE.test(markdown.charAt(cursor))) {
+		cursor += 1;
+	}
+	return cursor;
 }
 
 function splitDecorations(value: string): string[] {
