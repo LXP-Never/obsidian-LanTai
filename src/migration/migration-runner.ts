@@ -10,6 +10,7 @@ import type { NoteContent } from '../adapters/obsidian/note-content.obsidian.ts'
 import type { VaultBinary } from '../adapters/obsidian/vault-binary.obsidian.ts';
 import type { AttachmentPathResolver } from '../path/attachment-path-resolver.ts';
 import type { PluginSettings } from '../settings/plugin-settings.ts';
+import type { UploadConflictClass } from '../storage/classify-upload-conflict.ts';
 import type {
 	PreparedUploadSession,
 	UploadSessionFailure
@@ -56,6 +57,7 @@ interface MigrationQueue {
 
 interface MigrationRunnerConstructorParams {
 	readonly concurrency?: number | undefined;
+	confirmOverwrite?(this: void, differentCount: number): Promise<boolean>;
 	hasLocalReference(localPath: string): Promise<boolean>;
 	openNote(notePath: string): Promise<NoteContent | null>;
 	readonly pacer?: MigrationUploadPacer;
@@ -87,10 +89,13 @@ interface RunnableMigrationRefs {
 
 export class MigrationRunner {
 	private readonly concurrency: number;
+	private readonly confirmOverwrite: ((differentCount: number) => Promise<boolean>) | undefined;
+	private readonly conflictProbes = new Map<MigrationItem, UploadConflictClass>();
 	private readonly hasLocalReference: MigrationRunnerConstructorParams['hasLocalReference'];
 	private lastSavedAt = 0;
 	private readonly noteLocks = new Map<string, Promise<unknown>>();
 	private readonly openNote: MigrationRunnerConstructorParams['openNote'];
+	private overwriteDifferent = false;
 	private readonly pacer: MigrationUploadPacer;
 	private readonly pathResolver: AttachmentPathResolver;
 	private readonly prepareSession: MigrationRunnerConstructorParams['prepareSession'];
@@ -102,6 +107,7 @@ export class MigrationRunner {
 
 	public constructor(params: MigrationRunnerConstructorParams) {
 		this.concurrency = clampConcurrency(params.concurrency);
+		this.confirmOverwrite = params.confirmOverwrite;
 		this.hasLocalReference = (localPath): Promise<boolean> => params.hasLocalReference(localPath);
 		this.openNote = (notePath): Promise<NoteContent | null> => params.openNote(notePath);
 		this.pathResolver = params.pathResolver;
@@ -134,6 +140,9 @@ export class MigrationRunner {
 			await this.store.save(plan);
 			return plan;
 		}
+
+		this.conflictProbes.clear();
+		await this.resolveOverwritePreference(plan, prepared);
 
 		const notes = new Map<string, NoteContent>();
 		const queue: MigrationQueue = {
@@ -169,19 +178,11 @@ export class MigrationRunner {
 		pendingRefs: readonly MigrationRef[],
 		prepared: PreparedUploadSession
 	): Promise<null | UploadWriteMode> {
-		const noteFilePath = pendingRefs[0]?.notePath ?? '';
-		const ctx = createImageTemplateContext(item.localPath, noteFilePath);
-		const localBytes = await this.vault.readBinary(item.localPath);
-		const objectKey = this.pathResolver.resolveObjectKey({
-			ctx,
-			template: prepared.profile.objectKeyTemplate
-		});
-		const classification = await classifyUploadConflict({
-			localBytes,
-			objectKey,
-			storage: prepared.storage
-		});
+		const classification = await this.probeWriteMode(item, pendingRefs, prepared);
 		if (classification === 'different') {
+			if (this.overwriteDifferent) {
+				return 'overwrite';
+			}
 			failItem(item, pendingRefs, t('migration.objectKeyConflict'));
 			return null;
 		}
@@ -224,6 +225,65 @@ export class MigrationRunner {
 		}
 		this.lastSavedAt = now;
 		await this.store.save(plan);
+	}
+
+	private async probeWriteMode(
+		item: MigrationItem,
+		pendingRefs: readonly MigrationRef[],
+		prepared: PreparedUploadSession
+	): Promise<UploadConflictClass> {
+		const cached = this.conflictProbes.get(item);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const noteFilePath = pendingRefs[0]?.notePath ?? '';
+		const ctx = createImageTemplateContext(item.localPath, noteFilePath);
+		const localBytes = await this.vault.readBinary(item.localPath);
+		const objectKey = this.pathResolver.resolveObjectKey({
+			ctx,
+			template: prepared.profile.objectKeyTemplate
+		});
+		const classification = await classifyUploadConflict({
+			localBytes,
+			objectKey,
+			storage: prepared.storage
+		});
+		this.conflictProbes.set(item, classification);
+		return classification;
+	}
+
+	/**
+	 * 迁移开始前先统计「云端已有不同内容」的对象，只弹一次确认框。
+	 * 用户点「覆盖」则本次对这类对象改用 overwrite 直接覆盖；否则维持原有失败行为。
+	 */
+	private async resolveOverwritePreference(
+		plan: MigrationPlan,
+		prepared: PreparedUploadSession
+	): Promise<void> {
+		this.overwriteDifferent = false;
+		if (this.confirmOverwrite === undefined) {
+			return;
+		}
+		let differentCount = 0;
+		for (const item of plan.items) {
+			if (item.status === 'done' || (item.uploadedKey !== undefined && item.uploadedUrl !== undefined)) {
+				continue;
+			}
+			const pendingRefs = item.refs.filter((ref) => ref.status !== 'done');
+			if (
+				pendingRefs.length === 0
+				|| item.localPath.startsWith('unresolved:')
+				|| !(await this.vault.exists(item.localPath))
+			) {
+				continue;
+			}
+			if ((await this.probeWriteMode(item, pendingRefs, prepared)) === 'different') {
+				differentCount += 1;
+			}
+		}
+		if (differentCount > 0) {
+			this.overwriteDifferent = await this.confirmOverwrite(differentCount);
+		}
 	}
 
 	private async runItem(

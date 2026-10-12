@@ -127,4 +127,3 @@ describe('resolveMigrationFolders with a custom config dir', () => {
 		});
 	});
 });
-
