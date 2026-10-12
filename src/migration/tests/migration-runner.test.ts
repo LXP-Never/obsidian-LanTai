@@ -28,6 +28,7 @@ import { MigrationRunner } from '../migration-runner.ts';
 import { MigrationUploadPacer } from '../migration-upload-pacer.ts';
 
 interface CreateRunnerOptions {
+	confirmOverwrite?(this: void, differentCount: number): Promise<boolean>;
 	hasLocalReference?(): Promise<boolean>;
 	readonly notes?: Record<string, FakeNoteContent>;
 	readonly pacer?: MigrationUploadPacer;
@@ -127,7 +128,11 @@ function createRunner(options?: CreateRunnerOptions): CreateRunnerResult {
 	if (!profile) {
 		throw new Error('missing profile');
 	}
+	const confirmOverwrite = options?.confirmOverwrite;
 	const runner = new MigrationRunner({
+		...(confirmOverwrite === undefined
+			? {}
+			: { confirmOverwrite: (differentCount: number): Promise<boolean> => confirmOverwrite(differentCount) }),
 		hasLocalReference: (): Promise<boolean> =>
 			options?.hasLocalReference
 				? options.hasLocalReference()
@@ -248,6 +253,60 @@ describe('MigrationRunner', () => {
 			shouldPause: (): boolean => false
 		});
 		expect(plan.items[0]?.status).toBe('failed');
+		expect(note.getContent()).toBe('![[photo.png]]');
+		expect(storage.uploadedKeys).toHaveLength(0);
+	});
+
+	it('overwrites a content-different object key once the user confirms', async () => {
+		const note = new FakeNoteContent('![[photo.png]]');
+		const storage = new FakeObjectStorage({
+			objectBytes: { 'images/photo.png': new Uint8Array([9, 9, 9]) },
+			publicBaseUrl: 'https://cdn.example.com'
+		});
+		const askedCounts: number[] = [];
+		const { runner } = createRunner({
+			confirmOverwrite: (differentCount): Promise<boolean> => {
+				askedCounts.push(differentCount);
+				return Promise.resolve(true);
+			},
+			notes: { 'Journal/a.md': note },
+			storage,
+			vault: new FakeVaultBinary({ 'Journal/photo.png': new Uint8Array([1]) })
+		});
+		const plan = await runner.run({
+			plan: createPlan(),
+			shouldPause: (): boolean => false
+		});
+		expect(askedCounts).toEqual([1]);
+		expect(plan.status).toBe('completed');
+		expect(plan.items[0]?.status).toBe('done');
+		expect(storage.uploadedKeys).toEqual(['images/photo.png']);
+		expect(note.getContent()).toBe('![](https://cdn.example.com/images/photo.png)');
+	});
+
+	it('fails a content-different object key once the user declines to overwrite', async () => {
+		const note = new FakeNoteContent('![[photo.png]]');
+		const storage = new FakeObjectStorage({
+			objectBytes: { 'images/photo.png': new Uint8Array([9, 9, 9]) },
+			publicBaseUrl: 'https://cdn.example.com'
+		});
+		const askedCounts: number[] = [];
+		const { runner } = createRunner({
+			confirmOverwrite: (differentCount): Promise<boolean> => {
+				askedCounts.push(differentCount);
+				return Promise.resolve(false);
+			},
+			notes: { 'Journal/a.md': note },
+			storage,
+			vault: new FakeVaultBinary({ 'Journal/photo.png': new Uint8Array([1]) })
+		});
+		const plan = await runner.run({
+			plan: createPlan(),
+			shouldPause: (): boolean => false
+		});
+		expect(askedCounts).toEqual([1]);
+		expect(plan.items[0]?.status).toBe('failed');
+		expect(plan.items[0]?.error).toBeDefined();
 		expect(note.getContent()).toBe('![[photo.png]]');
 		expect(storage.uploadedKeys).toHaveLength(0);
 	});
